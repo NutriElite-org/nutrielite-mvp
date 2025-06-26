@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import os
 
@@ -15,7 +16,7 @@ import os
 
 # Path to LoRA adapter and tokenizer files
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"         # Updated base model version
-ADAPTER_PATH = "./adapter_model.safetensors"
+ADAPTER_PATH = "./adapter"
 TOKENIZER_PATH = "./tokenizer"
 TOKENIZER_PATH = "./tokenizer"
 
@@ -26,9 +27,12 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map="auto"
+    MODEL_PATH,
+    device_map=None,           # ← disable offloading
+    torch_dtype=torch.float16, # or float32
+    low_cpu_mem_usage=False,   # ensure full load into RAM
 )
-model = PeftModel.from_pretrained(model, ADAPTER_PATH, adapter_name="default")  # Apply LoRA adapter
+model = PeftModel.from_pretrained(model, ADAPTER_PATH, adapter_name="default")
 model.eval()
 
 # ===== FastAPI App =====
