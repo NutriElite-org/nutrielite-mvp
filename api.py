@@ -45,18 +45,6 @@ app.add_middleware(
 
 router = APIRouter()
 
-@router.post("/generate_plan", response_model=NutritionPlan)
-def generate_plan(profile: AthleteProfile):
-    prompt = build_prompt(profile)
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        output = model.generate(**inputs, max_new_tokens=1024, temperature=0.7,
-                                 do_sample=True, return_dict_in_generate=True)
-    decoded = tokenizer.decode(output.sequences[0], skip_special_tokens=True)
-    return plan_dict
-
-app.include_router(router, prefix="/api")
-app.mount("/", StaticFiles(directory="frontend_dist", html=True), name="static")
 # ===== Input & Output Schema =====
 
 class AthleteProfile(BaseModel):
@@ -79,6 +67,20 @@ class MealItem(BaseModel):
 class NutritionPlan(BaseModel):
     target_macros: dict
     meal_plan_and_supplements: List[MealItem]
+    
+@router.post("/generate_plan", response_model=NutritionPlan)
+def generate_plan(profile: AthleteProfile):
+    prompt = build_prompt(profile)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        output = model.generate(**inputs, max_new_tokens=1024, temperature=0.7,
+                                 do_sample=True, return_dict_in_generate=True)
+    decoded = tokenizer.decode(output.sequences[0], skip_special_tokens=True)
+    return plan_dict
+
+app.include_router(router, prefix="/api")
+app.mount("/", StaticFiles(directory="frontend_dist", html=True), name="static")
+
 
 # ===== Prompt Template =====
 
