@@ -79,7 +79,7 @@ def generate_plan(profile: AthleteProfile):
     return plan_dict
 
 app.include_router(router, prefix="/api")
-app.mount("/", StaticFiles(directory="frontend_dist", html=True), name="static")
+# app.mount("/", StaticFiles(directory="frontend_dist", html=True), name="static")
 
 
 # ===== Prompt Template =====
