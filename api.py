@@ -26,7 +26,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL
+    BASE_MODEL,
     device_map=None,           # ← disable offloading
     torch_dtype=torch.float16, # or float32
     low_cpu_mem_usage=False,   # ensure full load into RAM
