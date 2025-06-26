@@ -1,6 +1,9 @@
 # api.py — NutriElite MVP API Backend
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from peft import PeftModel
 from pydantic import BaseModel
 from typing import List, Optional
 import torch
@@ -11,7 +14,9 @@ import os
 # ===== Setup =====
 
 # Path to LoRA adapter and tokenizer files
+BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"         # Updated base model version
 ADAPTER_PATH = "./adapter_model.safetensors"
+TOKENIZER_PATH = "./tokenizer"
 TOKENIZER_PATH = "./tokenizer"
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
@@ -21,22 +26,35 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
-
-print("Loading model with LoRA adapters...")
 model = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL,
-    torch_dtype=torch.float16,
-    low_cpu_mem_usage=True,
-    device_map="auto",
+    BASE_MODEL, torch_dtype=torch.float16, low_cpu_mem_usage=True, device_map="auto"
 )
-model.load_adapter(ADAPTER_PATH, adapter_name="default")
-model.set_adapter("default")
+model = PeftModel.from_pretrained(model, ADAPTER_PATH, adapter_name="default")  # Apply LoRA adapter
 model.eval()
 
 # ===== FastAPI App =====
 
 app = FastAPI(title="NutriElite MVP API", version="1.0")
+# Enable CORS for all origins (allow frontend dev server to call the API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True
+)
 
+router = APIRouter()
+
+@router.post("/generate_plan", response_model=NutritionPlan)
+def generate_plan(profile: AthleteProfile):
+    prompt = build_prompt(profile)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        output = model.generate(**inputs, max_new_tokens=1024, temperature=0.7,
+                                 do_sample=True, return_dict_in_generate=True)
+    decoded = tokenizer.decode(output.sequences[0], skip_special_tokens=True)
+    return plan_dict
+
+app.include_router(router, prefix="/api")
+app.mount("/", StaticFiles(directory="frontend_dist", html=True), name="static")
 # ===== Input & Output Schema =====
 
 class AthleteProfile(BaseModel):
