@@ -18,7 +18,6 @@ BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"         # Updated base model v
 ADAPTER_PATH = "./adapter_model.safetensors"
 TOKENIZER_PATH = "./tokenizer"
 TOKENIZER_PATH = "./tokenizer"
-BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
