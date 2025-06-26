@@ -18,7 +18,6 @@ import os
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"         # Updated base model version
 ADAPTER_PATH = "./adapter"
 TOKENIZER_PATH = "./tokenizer"
-TOKENIZER_PATH = "./tokenizer"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -27,7 +26,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH,
+    BASE_MODEL
     device_map=None,           # ← disable offloading
     torch_dtype=torch.float16, # or float32
     low_cpu_mem_usage=False,   # ensure full load into RAM
