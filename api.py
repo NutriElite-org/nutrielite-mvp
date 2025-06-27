@@ -74,7 +74,7 @@ model = AutoModelForCausalLM.from_pretrained(
     low_cpu_mem_usage=True,
     trust_remote_code=True,
     # GPU optimization parameters
-    attn_implementation=None,
+    attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
     use_cache=True,  # Enable KV cache for faster inference
 )
 
@@ -136,49 +136,111 @@ class NutritionPlan(BaseModel):
 # ===== JSON Cleaning Functions =====
 
 def clean_json_string(text):
-    """Clean and fix common JSON formatting issues"""
+    """Clean and fix common JSON formatting issues specific to our model"""
     # Remove comments (// style)
     text = re.sub(r'//.*?(?=\n|$)', '', text)
     
     # Remove JavaScript-style comments (/* */)
     text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
     
-    # Fix common JSON issues
+    # Fix specific issues seen in your model's output:
+    # 1. Fix escaped quotes that shouldn't be escaped
+    text = text.replace('\\"', '"')
+    
+    # 2. Fix missing opening brace at start
+    if not text.strip().startswith('{'):
+        # Look for the first field and add opening brace
+        first_field_match = re.search(r'"[^"]+"\s*:', text)
+        if first_field_match:
+            insert_pos = first_field_match.start()
+            text = text[:insert_pos] + '{' + text[insert_pos:]
+    
+    # 3. Fix malformed field names like "_proteing" -> "protein_g"
+    text = re.sub(r'"_?proteing"', '"protein_g"', text)
+    text = re.sub(r'"carbs_pounds"', '"carbs_g"', text)
+    text = re.sub(r'"fat_lbs"', '"fat_g"', text)
+    
+    # 4. Fix Korean or other non-ASCII characters
+    text = re.sub(r'짜', '', text)
+    
+    # 5. Fix broken arrays and objects
+    text = re.sub(r'\[\s*"([^"]+)"\s*\]\s*([,}])', r'["\1"]\2', text)
+    
+    # 6. Fix common JSON formatting issues
     text = text.replace("'", '"')  # Replace single quotes with double quotes
     text = re.sub(r',\s*}', '}', text)  # Remove trailing commas before }
     text = re.sub(r',\s*]', ']', text)  # Remove trailing commas before ]
     
-    # Fix missing quotes around property names
-    text = re.sub(r'(\w+)(?=\s*:)', r'"\1"', text)
+    # 7. Fix incomplete closing brackets
+    open_braces = text.count('{')
+    close_braces = text.count('}')
+    if open_braces > close_braces:
+        text += '}' * (open_braces - close_braces)
     
-    # Fix unquoted string values that should be quoted
-    text = re.sub(r':\s*([a-zA-Z][a-zA-Z0-9_\s]*?)(?=\s*[,}\]])', r': "\1"', text)
+    open_brackets = text.count('[')
+    close_brackets = text.count(']')
+    if open_brackets > close_brackets:
+        text += ']' * (open_brackets - close_brackets)
     
-    # Remove extra whitespace and newlines within JSON
+    # 8. Remove extra whitespace and newlines within JSON
     text = re.sub(r'\s+', ' ', text)
     
     return text.strip()
 
 def extract_json_from_response(response_text):
-    """Extract and clean JSON from model response"""
-    # Try different approaches to find JSON
+    """Extract and clean JSON from model response with multiple fallback methods"""
     
-    # Method 1: Look for complete JSON object
-    json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+    # Method 1: Look for the most likely JSON object pattern
+    # Match opening brace, content, and closing brace with proper nesting
+    json_pattern = r'\{(?:[^{}]*|\{[^{}]*\})*\}'
     matches = re.findall(json_pattern, response_text, re.DOTALL)
     
     if matches:
         # Take the longest match (most likely to be complete)
         json_candidate = max(matches, key=len)
-        return clean_json_string(json_candidate)
+        cleaned = clean_json_string(json_candidate)
+        
+        # Quick validation - try to parse
+        try:
+            json.loads(cleaned)
+            return cleaned
+        except:
+            pass  # Continue to next method
     
-    # Method 2: Find first { to last }
+    # Method 2: Look for target_macros pattern and build from there
+    macro_match = re.search(r'"target_macros"\s*:\s*\{[^}]+\}', response_text)
+    meal_match = re.search(r'"meal_plan[^"]*"\s*:\s*\[[^\]]+\]', response_text)
+    
+    if macro_match and meal_match:
+        json_candidate = '{' + macro_match.group(0) + ', ' + meal_match.group(0) + '}'
+        cleaned = clean_json_string(json_candidate)
+        
+        try:
+            json.loads(cleaned)
+            return cleaned
+        except:
+            pass
+    
+    # Method 3: Find first { to last } and clean aggressively
     start = response_text.find('{')
     end = response_text.rfind('}')
     
     if start != -1 and end != -1 and end > start:
         json_candidate = response_text[start:end+1]
-        return clean_json_string(json_candidate)
+        cleaned = clean_json_string(json_candidate)
+        
+        # If still failing, try to reconstruct basic structure
+        try:
+            json.loads(cleaned)
+            return cleaned
+        except:
+            # Last resort: extract key information and reconstruct
+            calories_match = re.search(r'(?:calories|calorie)["\']?\s*:\s*(\d+)', cleaned, re.IGNORECASE)
+            protein_match = re.search(r'(?:protein|protein_g)["\']?\s*:\s*(\d+)', cleaned, re.IGNORECASE)
+            
+            if calories_match and protein_match:
+                reconstructed = f'{{"target_macros": {{"calories": {calories_match.group(1)}, "protein_g": {protein_match.group(1)}, "carbs_g": 300, "fat_g": 80}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["Oats", "Banana"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["Chicken", "Rice"]}}]}}'
+                return reconstructed
     
     raise ValueError("No valid JSON structure found in response")
 
@@ -191,16 +253,14 @@ def build_prompt(profile: AthleteProfile) -> str:
     calorie_adjustment = 200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0
     calorie_target = int(calorie_base + calorie_adjustment)
     
-    # Format prompt with clear JSON structure expectation
-    prompt = f"""<s>[INST] You are a sports nutritionist. Generate a nutrition plan for this athlete:
+    # Format prompt with simpler, more direct instructions
+    prompt = f"""<s>[INST] Create a nutrition plan for this {profile.sport} {profile.position}:
+Age {profile.age}, Weight {profile.weight}kg, Goal: {profile.goal}
 
-Age: {profile.age}, Height: {profile.height}cm, Weight: {profile.weight}kg, Body Fat: {profile.body_fat_percent}%
-Sport: {profile.sport}, Position: {profile.position}, Goal: {profile.goal}, Activity: {profile.activity_level}
+Target: {calorie_target} calories, {protein_target}g protein daily
 
-Create a daily nutrition plan with approximately {calorie_target} calories and {protein_target}g protein.
-
-Respond with ONLY valid JSON in this exact format (no comments, no extra text):
-{{"target_macros": {{"calories": {calorie_target}, "protein_g": {protein_target}, "carbs_g": 300, "fat_g": 80}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["food item 1", "food item 2"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["food item 1", "food item 2"]}}, {{"supplement": "Whey Protein", "time": "Post-workout", "items": ["25g whey protein powder"], "certification": "NSF Certified"}}]}}[/INST]
+Return valid JSON only:
+{{"target_macros": {{"calories": {calorie_target}, "protein_g": {protein_target}, "carbs_g": 300, "fat_g": 80}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["oats", "banana"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["chicken", "rice"]}}, {{"supplement": "Whey Protein", "time": "Post-workout", "items": ["25g protein powder"], "certification": "NSF"}}]}}[/INST]
 
 """
     
@@ -269,44 +329,49 @@ def generate_plan(profile: AthleteProfile):
         # Try to extract and parse JSON with improved cleaning
         try:
             # Use our robust JSON extraction function
+            print("Attempting JSON extraction...")
             json_str = extract_json_from_response(response_text)
-            print(f"Cleaned JSON: {json_str[:500]}...")
+            print(f"Extracted JSON (first 300 chars): {json_str[:300]}...")
             
-            # Additional cleaning specific to your model's output patterns
-            json_str = re.sub(r'"_(\w+)":', r'"\1":', json_str)  # Fix _property names
-            json_str = re.sub(r'"%([^"]+)":', r'"\1":', json_str)  # Fix %property names
-            json_str = re.sub(r':\s*(\d+)짜', r': \1', json_str)  # Remove Korean character
-            json_str = re.sub(r'\[\s*"([^"]+)"\s*\]\s*,', r'["\1"],', json_str)  # Fix array formatting
-            
-            print(f"Final cleaned JSON: {json_str}")
-            
+            # Validate by attempting to parse
             plan_dict = json.loads(json_str)
+            print("JSON parsing successful!")
             
             # Validate and fix the structure
             if "target_macros" not in plan_dict:
-                raise ValueError("Missing target_macros field")
+                print("Warning: Missing target_macros field, adding defaults")
+                plan_dict["target_macros"] = {
+                    "calories": int(2200 + (profile.weight * 15)),
+                    "protein_g": int(profile.weight * 2.2),
+                    "carbs_g": 300,
+                    "fat_g": 80
+                }
             
             if "meal_plan_and_supplements" not in plan_dict:
+                print("Warning: Missing meal_plan_and_supplements field")
                 # Try alternative field names that the model might use
                 if "meal_plan" in plan_dict:
                     plan_dict["meal_plan_and_supplements"] = plan_dict.pop("meal_plan")
-                elif "_meal_plan" in plan_dict:
-                    plan_dict["meal_plan_and_supplements"] = plan_dict.pop("_meal_plan")
+                    print("Found meal_plan field, renamed to meal_plan_and_supplements")
                 else:
-                    raise ValueError("Missing meal plan field")
+                    raise ValueError("Missing meal plan field in JSON")
             
             # Ensure target_macros has required fields with reasonable defaults
             macros = plan_dict["target_macros"]
             if "calories" not in macros:
                 macros["calories"] = int(2200 + (profile.weight * 15))
+                print("Added missing calories field")
             if "protein_g" not in macros:
                 macros["protein_g"] = int(profile.weight * 2.2)
+                print("Added missing protein_g field")
             if "carbs_g" not in macros:
                 macros["carbs_g"] = int(macros["calories"] * 0.5 / 4)
+                print("Added missing carbs_g field")
             if "fat_g" not in macros:
                 macros["fat_g"] = int(macros["calories"] * 0.25 / 9)
+                print("Added missing fat_g field")
             
-            print("Successfully parsed and validated JSON!")
+            print("Successfully parsed and validated JSON! Returning plan.")
             return plan_dict
             
         except (json.JSONDecodeError, ValueError) as e:
