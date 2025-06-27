@@ -74,7 +74,7 @@ model = AutoModelForCausalLM.from_pretrained(
     low_cpu_mem_usage=True,
     trust_remote_code=True,
     # GPU optimization parameters
-    attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
+    attn_implementation=None,
     use_cache=True,  # Enable KV cache for faster inference
 )
 
