@@ -397,8 +397,8 @@ def build_prompt(profile: AthleteProfile) -> str:
     fat_target = int(calorie_target * 0.25 / 9)  # 25% of calories from fat
     carb_target = int((calorie_target - (protein_target * 4) - (fat_target * 9)) / 4)
     
-    # Simplified prompt that matches training data better
-    prompt = f"""Generate a nutrition plan for an elite athlete:
+    # Simplified prompt that matches training data exactly
+    prompt = f"""Generate a complete nutrition plan for this athlete profile:
 
 Age: {profile.age} years
 Height: {profile.height} cm
@@ -409,39 +409,9 @@ Position: {profile.position}
 Goal: {profile.goal}
 Activity Level: {profile.activity_level}
 
-Return valid JSON only:
+Please provide a JSON response with target_macros and meal_plan_and_supplements. Include specific foods, timing, and any relevant supplements with certifications.
 
-{{
-  "target_macros": {{
-    "calories": {calorie_target},
-    "protein_g": {protein_target},
-    "carbs_g": {carb_target},
-    "fat_g": {fat_target}
-  }},
-  "meal_plan_and_supplements": [
-    {{
-      "meal": "Breakfast",
-      "time": "07:00",
-      "items": ["Oatmeal with protein powder", "Banana", "Almonds"]
-    }},
-    {{
-      "meal": "Lunch",
-      "time": "12:30", 
-      "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]
-    }},
-    {{
-      "meal": "Dinner",
-      "time": "19:00",
-      "items": ["Salmon fillet", "Sweet potato", "Broccoli"]
-    }},
-    {{
-      "supplement": "Whey Protein",
-      "time": "Post-workout",
-      "items": ["30g whey protein powder"],
-      "certification": "NSF Certified"
-    }}
-  ]
-}}"""
+{{"target_macros": {{"calories": {calorie_target}, "protein_g": {protein_target}, "carbs_g": {carb_target}, "fat_g": {fat_target}}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["Oatmeal with protein powder", "Banana", "Almonds"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]}}, {{"meal": "Dinner", "time": "19:00", "items": ["Salmon fillet", "Sweet potato", "Broccoli"]}}, {{"supplement": "Whey Protein", "time": "Post-workout", "items": ["30g whey protein powder"], "certification": "NSF Certified"}}]}}"""
     
     return prompt
 
