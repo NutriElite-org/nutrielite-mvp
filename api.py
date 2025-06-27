@@ -18,6 +18,7 @@ import re
 os.environ["HF_HOME"] = "/scratch0/giliev/hf_cache"
 os.environ["TRANSFORMERS_CACHE"] = "/scratch0/giliev/hf_cache"
 os.environ["HF_DATASETS_CACHE"] = "/scratch0/giliev/hf_cache"
+os.environ["FLASH_ATTENTION_2_ENABLED"] = "0"
 
 # Create cache directory if it doesn't exist
 cache_dir = "/scratch0/giliev/hf_cache"
