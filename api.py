@@ -11,6 +11,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import json
 import os
 import re
+import time
 
 # ===== Setup =====
 
@@ -18,7 +19,6 @@ import re
 os.environ["HF_HOME"] = "/scratch0/giliev/hf_cache"
 os.environ["TRANSFORMERS_CACHE"] = "/scratch0/giliev/hf_cache"
 os.environ["HF_DATASETS_CACHE"] = "/scratch0/giliev/hf_cache"
-os.environ["FLASH_ATTENTION_2_ENABLED"] = "0"
 
 # Create cache directory if it doesn't exist
 cache_dir = "/scratch0/giliev/hf_cache"
@@ -74,7 +74,7 @@ model = AutoModelForCausalLM.from_pretrained(
     low_cpu_mem_usage=True,
     trust_remote_code=True,
     # GPU optimization parameters
-    attn_implementation=None,
+    attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
     use_cache=True,  # Enable KV cache for faster inference
 )
 
@@ -133,29 +133,76 @@ class NutritionPlan(BaseModel):
     target_macros: TargetMacros
     meal_plan_and_supplements: List[MealItem]
 
+# ===== JSON Cleaning Functions =====
+
+def clean_json_string(text):
+    """Clean and fix common JSON formatting issues"""
+    # Remove comments (// style)
+    text = re.sub(r'//.*?(?=\n|$)', '', text)
+    
+    # Remove JavaScript-style comments (/* */)
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    
+    # Fix common JSON issues
+    text = text.replace("'", '"')  # Replace single quotes with double quotes
+    text = re.sub(r',\s*}', '}', text)  # Remove trailing commas before }
+    text = re.sub(r',\s*]', ']', text)  # Remove trailing commas before ]
+    
+    # Fix missing quotes around property names
+    text = re.sub(r'(\w+)(?=\s*:)', r'"\1"', text)
+    
+    # Fix unquoted string values that should be quoted
+    text = re.sub(r':\s*([a-zA-Z][a-zA-Z0-9_\s]*?)(?=\s*[,}\]])', r': "\1"', text)
+    
+    # Remove extra whitespace and newlines within JSON
+    text = re.sub(r'\s+', ' ', text)
+    
+    return text.strip()
+
+def extract_json_from_response(response_text):
+    """Extract and clean JSON from model response"""
+    # Try different approaches to find JSON
+    
+    # Method 1: Look for complete JSON object
+    json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+    matches = re.findall(json_pattern, response_text, re.DOTALL)
+    
+    if matches:
+        # Take the longest match (most likely to be complete)
+        json_candidate = max(matches, key=len)
+        return clean_json_string(json_candidate)
+    
+    # Method 2: Find first { to last }
+    start = response_text.find('{')
+    end = response_text.rfind('}')
+    
+    if start != -1 and end != -1 and end > start:
+        json_candidate = response_text[start:end+1]
+        return clean_json_string(json_candidate)
+    
+    raise ValueError("No valid JSON structure found in response")
+
 # ===== Prompt Building =====
 
 def build_prompt(profile: AthleteProfile) -> str:
-    # Format the prompt to match the training data format
-    prompt = f"""<s>[INST] Generate a nutrition plan for an elite athlete with the following profile:
+    # Calculate basic nutritional targets
+    protein_target = int(profile.weight * 2.2)  # 2.2g per kg
+    calorie_base = 2200 + (profile.weight * 15)
+    calorie_adjustment = 200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0
+    calorie_target = int(calorie_base + calorie_adjustment)
+    
+    # Format prompt with clear JSON structure expectation
+    prompt = f"""<s>[INST] You are a sports nutritionist. Generate a nutrition plan for this athlete:
 
-Age: {profile.age} years
-Height: {profile.height} cm  
-Weight: {profile.weight} kg
-Body Fat: {profile.body_fat_percent}%
-Sport: {profile.sport}
-Position: {profile.position}  
-Goal: {profile.goal}
-Activity Level: {profile.activity_level}
+Age: {profile.age}, Height: {profile.height}cm, Weight: {profile.weight}kg, Body Fat: {profile.body_fat_percent}%
+Sport: {profile.sport}, Position: {profile.position}, Goal: {profile.goal}, Activity: {profile.activity_level}
 
-Provide a complete daily nutrition and supplement plan in JSON format with:
-- target_macros: calories, protein_g, carbs_g, fat_g
-- meal_plan_and_supplements: array of meals/supplements with time, items, and certification
+Create a daily nutrition plan with approximately {calorie_target} calories and {protein_target}g protein.
 
-Ensure protein ≥2g/kg bodyweight and appropriate caloric intake for the goal. [/INST]
+Respond with ONLY valid JSON in this exact format (no comments, no extra text):
+{{"target_macros": {{"calories": {calorie_target}, "protein_g": {protein_target}, "carbs_g": 300, "fat_g": 80}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["food item 1", "food item 2"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["food item 1", "food item 2"]}}, {{"supplement": "Whey Protein", "time": "Post-workout", "items": ["25g whey protein powder"], "certification": "NSF Certified"}}]}}[/INST]
 
-""" + """{
-  "target_macros": {"""
+"""
     
     return prompt
 
@@ -190,15 +237,14 @@ def generate_plan(profile: AthleteProfile):
             
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=256,  # Further reduced for faster generation
+                max_new_tokens=256,  # Match your working parameters
                 min_new_tokens=50,   
-                temperature=0.1,     
-                do_sample=False,     # Greedy decoding for speed
+                temperature=0.1,     # Match your temperature
+                do_sample=False,     # Greedy decoding for consistency
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                early_stopping=True,
+                repetition_penalty=1.1,  # Match your repetition penalty
                 no_repeat_ngram_size=3,
-                repetition_penalty=1.1,
                 use_cache=True,  # Enable KV cache for faster generation
                 # GPU optimization
                 synced_gpus=False,  # Don't sync across GPUs for single GPU setup
@@ -218,42 +264,49 @@ def generate_plan(profile: AthleteProfile):
         # Extract JSON from the generated text
         response_text = generated_text[len(prompt):].strip()
         print(f"Response text: {response_text[:500]}...")
+        print(f"Full raw response:\n{response_text}\n" + "="*50)
         
-        # Try to extract and parse JSON
+        # Try to extract and parse JSON with improved cleaning
         try:
-            # First try to find a complete JSON object
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-            else:
-                # Fallback: look for JSON boundaries
-                json_start = response_text.find('{')
-                if json_start == -1:
-                    raise ValueError("No JSON block found in response")
-                
-                json_end = response_text.rfind('}') + 1
-                if json_end <= json_start:
-                    raise ValueError("Invalid JSON block boundaries")
-                
-                json_str = response_text[json_start:json_end]
+            # Use our robust JSON extraction function
+            json_str = extract_json_from_response(response_text)
+            print(f"Cleaned JSON: {json_str[:500]}...")
             
-            print(f"Extracted JSON: {json_str[:500]}...")
+            # Additional cleaning specific to your model's output patterns
+            json_str = re.sub(r'"_(\w+)":', r'"\1":', json_str)  # Fix _property names
+            json_str = re.sub(r'"%([^"]+)":', r'"\1":', json_str)  # Fix %property names
+            json_str = re.sub(r':\s*(\d+)짜', r': \1', json_str)  # Remove Korean character
+            json_str = re.sub(r'\[\s*"([^"]+)"\s*\]\s*,', r'["\1"],', json_str)  # Fix array formatting
             
-            # Clean up the JSON string
-            json_str = json_str.replace("'", '"')  # Replace single quotes with double quotes
-            json_str = re.sub(r',\s*}', '}', json_str)  # Remove trailing commas
-            json_str = re.sub(r',\s*]', ']', json_str)  # Remove trailing commas in arrays
+            print(f"Final cleaned JSON: {json_str}")
             
             plan_dict = json.loads(json_str)
             
-            # Validate the structure
-            if "target_macros" not in plan_dict or "meal_plan_and_supplements" not in plan_dict:
-                raise ValueError("Missing required fields in generated plan")
+            # Validate and fix the structure
+            if "target_macros" not in plan_dict:
+                raise ValueError("Missing target_macros field")
             
-            # Ensure target_macros has required fields
-            if not all(key in plan_dict["target_macros"] for key in ["calories", "protein_g", "carbs_g", "fat_g"]):
-                raise ValueError("Missing required macro fields")
+            if "meal_plan_and_supplements" not in plan_dict:
+                # Try alternative field names that the model might use
+                if "meal_plan" in plan_dict:
+                    plan_dict["meal_plan_and_supplements"] = plan_dict.pop("meal_plan")
+                elif "_meal_plan" in plan_dict:
+                    plan_dict["meal_plan_and_supplements"] = plan_dict.pop("_meal_plan")
+                else:
+                    raise ValueError("Missing meal plan field")
             
+            # Ensure target_macros has required fields with reasonable defaults
+            macros = plan_dict["target_macros"]
+            if "calories" not in macros:
+                macros["calories"] = int(2200 + (profile.weight * 15))
+            if "protein_g" not in macros:
+                macros["protein_g"] = int(profile.weight * 2.2)
+            if "carbs_g" not in macros:
+                macros["carbs_g"] = int(macros["calories"] * 0.5 / 4)
+            if "fat_g" not in macros:
+                macros["fat_g"] = int(macros["calories"] * 0.25 / 9)
+            
+            print("Successfully parsed and validated JSON!")
             return plan_dict
             
         except (json.JSONDecodeError, ValueError) as e:
