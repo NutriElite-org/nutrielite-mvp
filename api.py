@@ -14,14 +14,30 @@ import re
 
 # ===== Setup =====
 
+# Set cache directories to use scratch space instead of home directory
+os.environ["HF_HOME"] = "/scratch0/giliev/hf_cache"
+os.environ["TRANSFORMERS_CACHE"] = "/scratch0/giliev/hf_cache"
+os.environ["HF_DATASETS_CACHE"] = "/scratch0/giliev/hf_cache"
+
+# Create cache directory if it doesn't exist
+cache_dir = "/scratch0/giliev/hf_cache"
+os.makedirs(cache_dir, exist_ok=True)
+
 # Path to LoRA adapter and tokenizer files
 BASE_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
 ADAPTER_PATH = "./adapter"
 TOKENIZER_PATH = "./tokenizer"
 PROMPT_TEMPLATE_PATH = "./prompts/prompt_template.txt"
 
+# GPU optimization settings
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
+
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name()}")
+    print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    # Clear cache to start fresh
+    torch.cuda.empty_cache()
 
 # ===== Load Prompt Template =====
 
@@ -38,7 +54,11 @@ prompt_template = load_prompt_template()
 # ===== Load Model =====
 
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(
+    TOKENIZER_PATH, 
+    trust_remote_code=True,
+    cache_dir=cache_dir
+)
 
 # Ensure pad token is set
 if tokenizer.pad_token is None:
@@ -47,18 +67,28 @@ if tokenizer.pad_token is None:
 print("Loading base model...")
 model = AutoModelForCausalLM.from_pretrained(
     BASE_MODEL,
-    device_map="auto" if device == "cuda" else None,
-    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+    cache_dir=cache_dir,
+    device_map="auto",  # Automatically distribute across available GPUs
+    torch_dtype=torch.float16,  # Use half precision for memory efficiency
     low_cpu_mem_usage=True,
+    trust_remote_code=True,
+    # GPU optimization parameters
+    attn_implementation="flash_attention_2" if torch.cuda.is_available() else None,
+    use_cache=True,  # Enable KV cache for faster inference
 )
 
 print("Loading LoRA adapter...")
 model = PeftModel.from_pretrained(model, ADAPTER_PATH)
 model.eval()
 
-# Move to device if needed
-if device == "cuda" and not next(model.parameters()).is_cuda:
-    model = model.to(device)
+# Enable gradient checkpointing for memory efficiency during inference
+if hasattr(model, 'gradient_checkpointing_enable'):
+    model.gradient_checkpointing_enable()
+
+print(f"Model loaded successfully on {model.device}")
+if torch.cuda.is_available():
+    print(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    print(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
 # ===== FastAPI App =====
 
@@ -146,16 +176,39 @@ def generate_plan(profile: AthleteProfile):
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         print("Starting inference...")
+        start_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        end_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+        
+        if start_time:
+            start_time.record()
+        
         with torch.no_grad():
+            # Clear GPU cache before inference
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=1024,
-                temperature=0.3,  # Lower temperature for more consistent JSON
-                do_sample=True,
-                top_p=0.9,
+                max_new_tokens=256,  # Further reduced for faster generation
+                min_new_tokens=50,   
+                temperature=0.1,     
+                do_sample=False,     # Greedy decoding for speed
                 pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
+                eos_token_id=tokenizer.eos_token_id,
+                early_stopping=True,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.1,
+                use_cache=True,  # Enable KV cache for faster generation
+                # GPU optimization
+                synced_gpus=False,  # Don't sync across GPUs for single GPU setup
             )
+        
+        if end_time:
+            end_time.record()
+            torch.cuda.synchronize()
+            inference_time = start_time.elapsed_time(end_time) / 1000  # Convert to seconds
+            print(f"Inference time: {inference_time:.2f}s")
+            print(f"GPU memory after inference: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         
         # Decode the response
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -247,8 +300,17 @@ def generate_plan(profile: AthleteProfile):
             print("Using fallback plan due to parsing error")
             return fallback_plan
             
+    except torch.cuda.OutOfMemoryError as e:
+        print(f"GPU out of memory: {str(e)}")
+        # Clear cache and try again with smaller parameters
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise HTTPException(status_code=500, detail="GPU out of memory. Try reducing batch size or sequence length.")
     except Exception as e:
         print(f"Generation error: {str(e)}")
+        # Clean up GPU memory in case of error
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         raise HTTPException(status_code=500, detail=f"Plan generation failed: {str(e)}")
 
 @app.get("/")
@@ -257,6 +319,19 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "device": str(device)}
+    health_info = {
+        "status": "healthy", 
+        "device": str(device)
+    }
+    
+    if torch.cuda.is_available():
+        health_info.update({
+            "gpu_name": torch.cuda.get_device_name(),
+            "gpu_memory_allocated_gb": round(torch.cuda.memory_allocated() / 1e9, 2),
+            "gpu_memory_cached_gb": round(torch.cuda.memory_reserved() / 1e9, 2),
+            "gpu_memory_total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2)
+        })
+    
+    return health_info
 
 # ===== Run via: uvicorn api:app --reload =====
