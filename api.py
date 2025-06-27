@@ -87,7 +87,7 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch.float16,  # Use half precision for memory efficiency
     low_cpu_mem_usage=True,
     trust_remote_code=True,
-    # GPU optimization parameters
+    # Disable FlashAttention to avoid installation issues
     attn_implementation=None,
     use_cache=True,  # Enable KV cache for faster inference
 )
@@ -287,6 +287,103 @@ def extract_json_from_response(response_text):
     
     raise ValueError("No valid JSON structure found in response")
 
+def reconstruct_json_from_fragments(response_text, profile):
+    """Reconstruct valid JSON from partial/malformed response"""
+    
+    # Extract numbers for macros
+    calories_match = re.search(r'(?:calories?|calorie)["\s]*:[\s]*(\d+)', response_text, re.IGNORECASE)
+    protein_match = re.search(r'(?:protein)["\s_g]*:[\s]*(\d+)', response_text, re.IGNORECASE)
+    carbs_match = re.search(r'(?:carb|carbohydrate)["\s_g]*:[\s]*(\d+)', response_text, re.IGNORECASE)
+    fat_match = re.search(r'(?:fat|lipid)["\s_g]*:[\s]*(\d+)', response_text, re.IGNORECASE)
+    
+    # Use extracted values or calculate defaults
+    calories = int(calories_match.group(1)) if calories_match else int(2200 + (profile.weight * 15))
+    protein = int(protein_match.group(1)) if protein_match else int(profile.weight * 2.2)
+    carbs = int(carbs_match.group(1)) if carbs_match else int(calories * 0.5 / 4)
+    fat = int(fat_match.group(1)) if fat_match else int(calories * 0.25 / 9)
+    
+    # Extract meal information
+    meals = []
+    
+    # Look for breakfast items
+    breakfast_match = re.search(r'breakfast.*?items.*?\[(.*?)\]', response_text, re.IGNORECASE | re.DOTALL)
+    if breakfast_match:
+        items = re.findall(r'"([^"]+)"', breakfast_match.group(1))
+        if items:
+            meals.append({
+                "meal": "Breakfast",
+                "time": "07:00",
+                "items": items[:3]
+            })
+    
+    # Look for lunch items
+    lunch_match = re.search(r'lunch.*?items.*?\[(.*?)\]', response_text, re.IGNORECASE | re.DOTALL)
+    if lunch_match:
+        items = re.findall(r'"([^"]+)"', lunch_match.group(1))
+        if items:
+            meals.append({
+                "meal": "Lunch", 
+                "time": "12:30",
+                "items": items[:3]
+            })
+    
+    # Look for dinner items
+    dinner_match = re.search(r'dinner.*?items.*?\[(.*?)\]', response_text, re.IGNORECASE | re.DOTALL)
+    if dinner_match:
+        items = re.findall(r'"([^"]+)"', dinner_match.group(1))
+        if items:
+            meals.append({
+                "meal": "Dinner",
+                "time": "19:00", 
+                "items": items[:3]
+            })
+    
+    # Look for supplement information
+    supplement_match = re.search(r'supplement.*?(?:whey|protein)', response_text, re.IGNORECASE)
+    if supplement_match:
+        meals.append({
+            "supplement": "Whey Protein",
+            "time": "Post-workout",
+            "items": ["30g whey protein powder"],
+            "certification": "NSF Certified"
+        })
+    
+    # If no meals found, use defaults
+    if not meals:
+        meals = [
+            {
+                "meal": "Breakfast",
+                "time": "07:00",
+                "items": ["Oatmeal with protein powder", "Banana", "Almonds"]
+            },
+            {
+                "meal": "Lunch",
+                "time": "12:30",
+                "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]
+            },
+            {
+                "meal": "Dinner", 
+                "time": "19:00",
+                "items": ["Salmon fillet", "Sweet potato", "Broccoli"]
+            },
+            {
+                "supplement": "Whey Protein",
+                "time": "Post-workout",
+                "items": ["30g whey protein powder"],
+                "certification": "NSF Certified"
+            }
+        ]
+    
+    return {
+        "target_macros": {
+            "calories": calories,
+            "protein_g": protein,
+            "carbs_g": carbs,
+            "fat_g": fat
+        },
+        "meal_plan_and_supplements": meals
+    }
+
 # ===== Prompt Building =====
 
 def build_prompt(profile: AthleteProfile) -> str:
@@ -458,19 +555,28 @@ def generate_plan(profile: AthleteProfile):
             print(f"JSON parsing error: {str(e)}")
             print(f"Raw response: {response_text}")
             
-            # Return a fallback plan based on athlete profile
-            calories = int(2200 + (profile.weight * 15) + (200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0))
-            protein = int(profile.weight * 2.2)  # 2.2g per kg
-            fat = int(calories * 0.25 / 9)  # 25% of calories from fat
-            carbs = int((calories - (protein * 4) - (fat * 9)) / 4)  # Remaining calories from carbs
-            
-            fallback_plan = {
-                "target_macros": {
-                    "calories": calories,
-                    "protein_g": protein,
-                    "carbs_g": carbs,
-                    "fat_g": fat
-                },
+            # Try to reconstruct JSON from fragments
+            print("Attempting to reconstruct JSON from response fragments...")
+            try:
+                reconstructed_plan = reconstruct_json_from_fragments(response_text, profile)
+                print("Successfully reconstructed plan from fragments!")
+                return reconstructed_plan
+            except Exception as reconstruction_error:
+                print(f"Reconstruction failed: {reconstruction_error}")
+                
+                # Final fallback plan based on athlete profile
+                calories = int(2200 + (profile.weight * 15) + (200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0))
+                protein = int(profile.weight * 2.2)  # 2.2g per kg
+                fat = int(calories * 0.25 / 9)  # 25% of calories from fat
+                carbs = int((calories - (protein * 4) - (fat * 9)) / 4)  # Remaining calories from carbs
+                
+                fallback_plan = {
+                    "target_macros": {
+                        "calories": calories,
+                        "protein_g": protein,
+                        "carbs_g": carbs,
+                        "fat_g": fat
+                    },
                 "meal_plan_and_supplements": [
                     {
                         "meal": "Breakfast",
