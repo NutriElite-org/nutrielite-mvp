@@ -185,107 +185,177 @@ def clean_json_string(text):
     
     return text
 
-def extract_json_from_response(response_text):
-    """Enhanced JSON extraction for your model's output patterns"""
+def parse_training_data_response(response_text, profile):
+    """Parse response that matches your training data output format"""
     
-    print(f"Full raw response:\n{response_text}")
-    
-    # Try to find a complete JSON structure
-    # Look for the pattern that starts with target_macros or similar
-    
-    # Method 1: Look for the main structure
-    json_patterns = [
-        r'\{\s*"target_macros".*?\}\s*\}',  # Complete structure
-        r'\{\s*"calories".*?\]\s*\}',      # Alternative structure
-        r'\{.*?"meal_plan_and_supplements".*?\]\s*\}'  # Focus on meals
-    ]
-    
-    for pattern in json_patterns:
-        matches = re.findall(pattern, response_text, re.DOTALL)
-        if matches:
-            json_candidate = matches[0]
-            print(f"Pattern matched: {pattern[:50]}...")
-            print(f"Extracted candidate: {json_candidate[:200]}...")
-            return clean_json_string(json_candidate)
-    
-    # Method 2: Manual reconstruction from fragments
     try:
-        # Try to extract individual components
-        calories_match = re.search(r'(?:alories|calories)["\s]*:[\s]*(\d+)', response_text)
-        protein_match = re.search(r'(?:protein|proteing)[_g\s"]*:[\s]*(\d+\.?\d*)', response_text)
+        # Look for the meal_plan section in the response
+        meal_plan_match = re.search(r'"meal_plan":\s*{(.*?)}', response_text, re.DOTALL)
+        supplements_match = re.search(r'"supplements":\s*\[(.*?)\]', response_text, re.DOTALL)
         
-        if calories_match and protein_match:
-            calories = int(float(calories_match.group(1)))
-            protein = int(float(protein_match.group(1)))
+        # Extract nutrition summary for target macros
+        nutrition_match = re.search(r'"nutrition_summary":\s*{(.*?)}', response_text, re.DOTALL)
+        
+        # Parse meals from your training data format
+        meals = []
+        if meal_plan_match:
+            meal_content = meal_plan_match.group(1)
             
-            # Look for meal information
-            meals = []
-            meal_patterns = [
-                r'"meal":\s*"([^"]+)".*?"time":\s*"([^"]+)".*?"items":\s*\[([^\]]+)\]',
-                r'"([^"]*(?:Breakfast|Lunch|Dinner)[^"]*)".*?"(\d{2}:\d{2})".*?\[([^\]]+)\]'
-            ]
+            # Extract individual meals (breakfast, lunch, dinner, snacks)
+            breakfast_match = re.search(r'"breakfast":\s*"([^"]+)"', meal_content)
+            lunch_match = re.search(r'"lunch":\s*"([^"]+)"', meal_content)
+            dinner_match = re.search(r'"dinner":\s*"([^"]+)"', meal_content)
+            snacks_match = re.search(r'"snacks":\s*"([^"]+)"', meal_content)
             
-            for pattern in meal_patterns:
-                meal_matches = re.findall(pattern, response_text, re.DOTALL)
-                for match in meal_matches:
-                    meal_name, time, items_str = match
-                    # Parse items
-                    items = re.findall(r'"([^"]+)"', items_str)
-                    if not items:
-                        items = [item.strip() for item in items_str.split(',') if item.strip()]
-                    
-                    meals.append({
-                        "meal": meal_name.strip(),
-                        "time": time.strip(),
-                        "items": items[:3]  # Limit to 3 items
-                    })
+            if breakfast_match:
+                items = [item.strip() for item in breakfast_match.group(1).split(';')]
+                meals.append({
+                    "meal": "Breakfast",
+                    "time": "07:00",
+                    "items": items[:3]  # Limit to 3 items for display
+                })
             
-            # Construct valid JSON
-            reconstructed = {
-                "target_macros": {
-                    "calories": calories,
-                    "protein_g": protein,
-                    "carbs_g": max(200, int(calories * 0.5 / 4)),  # Estimate carbs
-                    "fat_g": max(50, int(calories * 0.25 / 9))     # Estimate fat
-                },
-                "meal_plan_and_supplements": meals if meals else [
-                    {
-                        "meal": "Breakfast",
-                        "time": "07:00", 
-                        "items": ["Protein oats", "Banana", "Peanut butter"]
-                    },
-                    {
-                        "meal": "Lunch",
-                        "time": "12:30",
-                        "items": ["Grilled chicken", "Quinoa", "Vegetables"]
-                    },
-                    {
-                        "supplement": "Protein Powder",
-                        "time": "Post-workout",
-                        "items": ["30g whey protein"],
-                        "certification": "NSF Certified"
-                    }
-                ]
+            if lunch_match:
+                items = [item.strip() for item in lunch_match.group(1).split(';')]
+                meals.append({
+                    "meal": "Lunch", 
+                    "time": "12:30",
+                    "items": items[:3]
+                })
+                
+            if dinner_match:
+                items = [item.strip() for item in dinner_match.group(1).split(';')]
+                meals.append({
+                    "meal": "Dinner",
+                    "time": "19:00", 
+                    "items": items[:3]
+                })
+                
+            if snacks_match:
+                items = [item.strip() for item in snacks_match.group(1).split(';')]
+                meals.append({
+                    "meal": "Snacks",
+                    "time": "15:00",
+                    "items": items[:2]  # Fewer snack items
+                })
+        
+        # Parse supplements from training data format
+        if supplements_match:
+            supplement_content = supplements_match.group(1)
+            
+            # Extract first supplement as example
+            product_match = re.search(r'"product":\s*"([^"]+)"', supplement_content)
+            type_match = re.search(r'"type":\s*"([^"]+)"', supplement_content)
+            brand_match = re.search(r'"brand":\s*"([^"]+)"', supplement_content)
+            
+            if product_match and type_match:
+                meals.append({
+                    "supplement": product_match.group(1),
+                    "time": "Post-workout",
+                    "items": [f"1 serving {product_match.group(1)}"],
+                    "certification": "NSF Certified" if "protein" in type_match.group(1).lower() else None
+                })
+        
+        # Parse nutrition summary for macros
+        macros = {}
+        if nutrition_match:
+            nutrition_content = nutrition_match.group(1)
+            
+            calories_match = re.search(r'"total_calories":\s*(\d+)', nutrition_content)
+            protein_match = re.search(r'"protein_g":\s*(\d+)', nutrition_content)
+            carbs_match = re.search(r'"carbohydrates_g":\s*(\d+)', nutrition_content)
+            fat_match = re.search(r'"fat_g":\s*(\d+)', nutrition_content)
+            
+            macros = {
+                "calories": int(calories_match.group(1)) if calories_match else int(2200 + (profile.weight * 15)),
+                "protein_g": int(protein_match.group(1)) if protein_match else int(profile.weight * 2.2),
+                "carbs_g": int(carbs_match.group(1)) if carbs_match else 300,
+                "fat_g": int(fat_match.group(1)) if fat_match else 100
             }
+        else:
+            # Fallback macro calculation
+            calories = int(2200 + (profile.weight * 15) + (200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0))
+            protein = int(profile.weight * 2.2)
+            fat = int(calories * 0.25 / 9)
+            carbs = int((calories - (protein * 4) - (fat * 9)) / 4)
             
-            print(f"Reconstructed JSON from fragments")
-            return json.dumps(reconstructed)
-            
+            macros = {
+                "calories": calories,
+                "protein_g": protein,
+                "carbs_g": carbs,
+                "fat_g": fat
+            }
+        
+        # Ensure we have at least basic meals if parsing failed
+        if not meals:
+            meals = [
+                {
+                    "meal": "Breakfast",
+                    "time": "07:00",
+                    "items": ["Oatmeal with protein powder", "Banana", "Almonds"]
+                },
+                {
+                    "meal": "Lunch",
+                    "time": "12:30", 
+                    "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]
+                },
+                {
+                    "meal": "Dinner",
+                    "time": "19:00",
+                    "items": ["Salmon fillet", "Sweet potato", "Broccoli"]
+                },
+                {
+                    "supplement": "Whey Protein",
+                    "time": "Post-workout",
+                    "items": ["30g whey protein powder"],
+                    "certification": "NSF Certified"
+                }
+            ]
+        
+        return {
+            "target_macros": macros,
+            "meal_plan_and_supplements": meals
+        }
+        
     except Exception as e:
-        print(f"Reconstruction failed: {e}")
-    
-    # Method 3: Find any JSON-like structure
-    start = response_text.find('{')
-    end = response_text.rfind('}')
-    
-    if start != -1 and end != -1 and end > start:
-        json_candidate = response_text[start:end+1]
-        print(f"Final fallback extraction: {json_candidate[:200]}...")
-        return clean_json_string(json_candidate)
-    
-    raise ValueError("No valid JSON structure found in response")
-    
-    raise ValueError("No valid JSON structure found in response")
+        print(f"Error parsing training data response: {e}")
+        # Return fallback plan
+        calories = int(2200 + (profile.weight * 15))
+        protein = int(profile.weight * 2.2)
+        fat = int(calories * 0.25 / 9)
+        carbs = int((calories - (protein * 4) - (fat * 9)) / 4)
+        
+        return {
+            "target_macros": {
+                "calories": calories,
+                "protein_g": protein,
+                "carbs_g": carbs,
+                "fat_g": fat
+            },
+            "meal_plan_and_supplements": [
+                {
+                    "meal": "Breakfast",
+                    "time": "07:00",
+                    "items": ["Oatmeal with protein powder", "Banana", "Almonds"]
+                },
+                {
+                    "meal": "Lunch", 
+                    "time": "12:30",
+                    "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]
+                },
+                {
+                    "meal": "Dinner",
+                    "time": "19:00",
+                    "items": ["Salmon fillet", "Sweet potato", "Broccoli"]
+                },
+                {
+                    "supplement": "Whey Protein",
+                    "time": "Post-workout",
+                    "items": ["30g whey protein powder"],
+                    "certification": "NSF Certified"
+                }
+            ]
+        }
 
 def reconstruct_json_from_fragments(response_text, profile):
     """Reconstruct valid JSON from partial/malformed response"""
@@ -384,34 +454,159 @@ def reconstruct_json_from_fragments(response_text, profile):
         "meal_plan_and_supplements": meals
     }
 
+# ===== Metabolic Calculations =====
+
+def calculate_bmr(weight_kg, height_cm, age, gender="male"):
+    """Calculate Basal Metabolic Rate using Mifflin-St Jeor equation"""
+    if gender.lower() == "male":
+        return (10 * weight_kg) + (6.25 * height_cm) - (5 * age) + 5
+    else:
+        return (10 * weight_kg) + (6.25 * height_cm) - (5 * age) - 161
+
+def calculate_tdee(bmr, activity_level):
+    """Calculate Total Daily Energy Expenditure"""
+    activity_multipliers = {
+        "sedentary": 1.2,
+        "lightly_active": 1.375,
+        "moderately_active": 1.55,
+        "active": 1.725,
+        "very_active": 1.9,
+        "extremely_active": 2.2
+    }
+    multiplier = activity_multipliers.get(activity_level, 1.725)
+    return bmr * multiplier
+
+def convert_height_to_feet_inches(height_cm):
+    """Convert height from cm to feet'inches" format"""
+    total_inches = height_cm / 2.54
+    feet = int(total_inches // 12)
+    inches = int(total_inches % 12)
+    return f"{feet}'{inches}\""
+
+def convert_weight_to_lbs(weight_kg):
+    """Convert weight from kg to lbs"""
+    return weight_kg * 2.20462
+
 # ===== Prompt Building =====
 
 def build_prompt(profile: AthleteProfile) -> str:
-    """Build prompt optimized for your fine-tuned model"""
+    """Build prompt that exactly matches the training data format"""
     
-    # Calculate basic nutritional targets
-    protein_target = int(profile.weight * 2.2)  # 2.2g per kg
-    calorie_base = 2200 + (profile.weight * 15)
-    calorie_adjustment = 200 if profile.goal == "muscle gain" else -200 if profile.goal == "cutting" else 0
-    calorie_target = int(calorie_base + calorie_adjustment)
-    fat_target = int(calorie_target * 0.25 / 9)  # 25% of calories from fat
-    carb_target = int((calorie_target - (protein_target * 4) - (fat_target * 9)) / 4)
+    # Convert units to match training data
+    weight_lbs = convert_weight_to_lbs(profile.weight)
+    height_feet = convert_height_to_feet_inches(profile.height)
     
-    # Simplified prompt that matches training data exactly
-    prompt = f"""Generate a complete nutrition plan for this athlete profile:
+    # Calculate metabolic values to match training data
+    bmr = calculate_bmr(profile.weight, profile.height, profile.age)
+    rmr = bmr * 1.038  # RMR from training data is typically 3.8% higher than BMR
+    
+    # Map your goals to training data goals exactly
+    goal_mapping = {
+        "muscle gain": "bulking",
+        "cutting": "cutting", 
+        "maintenance": "general",
+        "weight loss": "cutting",
+        "endurance": "endurance",
+        "strength": "strength",
+        "general": "general"
+    }
+    mapped_goal = goal_mapping.get(profile.goal.lower(), "general")
+    
+    # Map activity levels to match training data exactly
+    activity_mapping = {
+        "sedentary": "sedentary",
+        "lightly active": "lightly_active", 
+        "moderately active": "active",
+        "active": "active",
+        "very active": "very_active",
+        "very_active": "very_active"
+    }
+    mapped_activity = activity_mapping.get(profile.activity_level.lower(), "active")
+    
+    # Calculate TDEE
+    tdee = calculate_tdee(bmr, mapped_activity)
+    
+    # Adjust calories based on goal (matches training data patterns)
+    if mapped_goal == "bulking":
+        target_calories = tdee  # Training data shows TDEE for bulking
+    elif mapped_goal == "cutting":
+        target_calories = tdee * 0.85  # Moderate deficit for cutting
+    else:
+        target_calories = tdee  # Maintenance calories
+    
+    # Calculate macros matching training data patterns exactly
+    if mapped_goal == "cutting":
+        # Higher protein ratio for cutting (from training data analysis)
+        protein_g = weight_lbs * 1.6
+        fat_g = target_calories * 0.20 / 9  # 20% fat for cutting
+        carbs_g = (target_calories - (protein_g * 4) - (fat_g * 9)) / 4
+    elif mapped_goal == "bulking":
+        # Training data shows higher protein for bulking
+        protein_g = weight_lbs * 1.4
+        fat_g = target_calories * 0.25 / 9  # 25% fat for bulking  
+        carbs_g = (target_calories - (protein_g * 4) - (fat_g * 9)) / 4
+    else:
+        # General/maintenance (most common in training data)
+        protein_g = weight_lbs * 1.2
+        fat_g = target_calories * 0.25 / 9  # 25% fat baseline
+        carbs_g = (target_calories - (protein_g * 4) - (fat_g * 9)) / 4
+    
+    # Map experience based on age (matches training data categories)
+    if profile.age < 23:
+        experience = "rookie"
+    elif profile.age < 27:
+        experience = "young"  
+    elif profile.age < 33:
+        experience = "prime"
+    elif profile.age < 37:
+        experience = "veteran"
+    else:
+        experience = "elder"
+    
+    # Calculate body composition (simplified estimate for missing data)
+    body_fat = getattr(profile, 'body_fat_percent', 12.0 if profile.goal != 'cutting' else 10.0)
+    lean_mass_lbs = weight_lbs * (1 - body_fat / 100)
+    
+    # Build the prompt in EXACT training data format with Mistral chat template
+    prompt = f"""<s>[INST] Generate a comprehensive nutrition plan for this athlete profile:
 
-Age: {profile.age} years
-Height: {profile.height} cm
-Weight: {profile.weight} kg
-Body Fat: {profile.body_fat_percent}%
-Sport: {profile.sport}
-Position: {profile.position}
-Goal: {profile.goal}
-Activity Level: {profile.activity_level}
+{{
+  "athlete_profile": {{
+    "demographics": {{
+      "age": {profile.age},
+      "height": "{height_feet}",
+      "weight_lbs": {weight_lbs:.1f},
+      "position": "{profile.position}"
+    }},
+    "body_composition": {{
+      "body_fat_percent": {body_fat},
+      "lean_mass_lbs": {lean_mass_lbs:.1f}
+    }},
+    "training": {{
+      "goal": "{mapped_goal}",
+      "activity_level": "{mapped_activity}",
+      "experience": "{experience}"
+    }},
+    "metabolism": {{
+      "bmr": {bmr:.1f},
+      "rmr": {rmr:.1f},
+      "tdee": {tdee:.1f}
+    }}
+  }},
+  "nutrition_targets": {{
+    "calories": {target_calories:.1f},
+    "protein_g": {protein_g:.1f},
+    "carbohydrates_g": {carbs_g:.1f},
+    "fat_g": {fat_g:.1f}
+  }}
+}}
 
-Please provide a JSON response with target_macros and meal_plan_and_supplements. Include specific foods, timing, and any relevant supplements with certifications.
+Please provide a detailed response with:
+1. meal_plan with meals (breakfast, lunch, dinner, snacks) and nutrition_summary
+2. supplements array with product, type, brand, and usage fields
+3. rationale explaining the recommendations
 
-{{"target_macros": {{"calories": {calorie_target}, "protein_g": {protein_target}, "carbs_g": {carb_target}, "fat_g": {fat_target}}}, "meal_plan_and_supplements": [{{"meal": "Breakfast", "time": "07:00", "items": ["Oatmeal with protein powder", "Banana", "Almonds"]}}, {{"meal": "Lunch", "time": "12:30", "items": ["Grilled chicken breast", "Quinoa", "Mixed vegetables"]}}, {{"meal": "Dinner", "time": "19:00", "items": ["Salmon fillet", "Sweet potato", "Broccoli"]}}, {{"supplement": "Whey Protein", "time": "Post-workout", "items": ["30g whey protein powder"], "certification": "NSF Certified"}}]}}"""
+Format as JSON exactly like the training examples. [/INST]"""
     
     return prompt
 
@@ -478,54 +673,18 @@ def generate_plan(profile: AthleteProfile):
         print(f"Response text: {response_text[:500]}...")
         print(f"Full raw response:\n{response_text}\n" + "="*50)
         
-        # Try to extract and parse JSON with improved cleaning
+        # Parse the response using the training data format parser
         try:
-            # Use our robust JSON extraction function
-            json_str = extract_json_from_response(response_text)
-            print(f"Cleaned JSON: {json_str[:500]}...")
-            
-            # Additional cleaning specific to your model's output patterns
-            json_str = re.sub(r'"_(\w+)":', r'"\1":', json_str)  # Fix _property names
-            json_str = re.sub(r'"%([^"]+)":', r'"\1":', json_str)  # Fix %property names
-            json_str = re.sub(r':\s*(\d+)짜', r': \1', json_str)  # Remove Korean character
-            json_str = re.sub(r'\[\s*"([^"]+)"\s*\]\s*,', r'["\1"],', json_str)  # Fix array formatting
-            
-            print(f"Final cleaned JSON: {json_str}")
-            
-            plan_dict = json.loads(json_str)
-            
-            # Validate and fix the structure
-            if "target_macros" not in plan_dict:
-                raise ValueError("Missing target_macros field")
-            
-            if "meal_plan_and_supplements" not in plan_dict:
-                # Try alternative field names that the model might use
-                if "meal_plan" in plan_dict:
-                    plan_dict["meal_plan_and_supplements"] = plan_dict.pop("meal_plan")
-                elif "_meal_plan" in plan_dict:
-                    plan_dict["meal_plan_and_supplements"] = plan_dict.pop("_meal_plan")
-                else:
-                    raise ValueError("Missing meal plan field")
-            
-            # Ensure target_macros has required fields with reasonable defaults
-            macros = plan_dict["target_macros"]
-            if "calories" not in macros:
-                macros["calories"] = int(2200 + (profile.weight * 15))
-            if "protein_g" not in macros:
-                macros["protein_g"] = int(profile.weight * 2.2)
-            if "carbs_g" not in macros:
-                macros["carbs_g"] = int(macros["calories"] * 0.5 / 4)
-            if "fat_g" not in macros:
-                macros["fat_g"] = int(macros["calories"] * 0.25 / 9)
-            
-            print("Successfully parsed and validated JSON!")
+            # Use our training data parsing function
+            plan_dict = parse_training_data_response(response_text, profile)
+            print("Successfully parsed response using training data format!")
             return plan_dict
             
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"JSON parsing error: {str(e)}")
+        except Exception as e:
+            print(f"Training data parsing error: {str(e)}")
             print(f"Raw response: {response_text}")
             
-            # Try to reconstruct JSON from fragments
+            # Try to reconstruct JSON from fragments as fallback
             print("Attempting to reconstruct JSON from response fragments...")
             try:
                 reconstructed_plan = reconstruct_json_from_fragments(response_text, profile)
